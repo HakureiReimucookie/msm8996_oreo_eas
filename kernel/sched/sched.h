@@ -558,11 +558,12 @@ struct rq {
 #endif
 	int skip_clock_update;
 
+#ifdef CONFIG_CPU_QUIET
 	/* time-based average load */
- 	u64 nr_last_stamp;
- 	unsigned int ave_nr_running;
+	u64 nr_last_stamp;
 	u64 nr_running_integral;
- 	seqcount_t ave_seqcnt;
+	seqcount_t ave_seqcnt;
+#endif
 
 	/* capture load from *all* tasks on this cpu: */
 	struct load_weight load;
@@ -1304,7 +1305,7 @@ extern void init_entity_runnable_average(struct sched_entity *se);
 
 extern void init_max_cpu_capacity(struct max_cpu_capacity *mcc);
 
-static inline void add_nr_running(struct rq *rq, unsigned count)
+static inline void __add_nr_running(struct rq *rq, unsigned count)
 {
 	unsigned prev_nr = rq->nr_running;
 
@@ -1332,32 +1333,47 @@ static inline void add_nr_running(struct rq *rq, unsigned count)
 	}
 }
 
-#define NR_AVE_PERIOD_EXP	28
-#define NR_AVE_SCALE(x)		((x) << FSHIFT)
-#define NR_AVE_PERIOD		(1 << NR_AVE_PERIOD_EXP)
-#define NR_AVE_DIV_PERIOD(x)	((x) >> NR_AVE_PERIOD_EXP)
+static inline void __sub_nr_running(struct rq *rq, unsigned count)
+{
+	rq->nr_running -= count;
+}
 
-static inline unsigned int do_avg_nr_running(struct rq *rq)
+#ifdef CONFIG_CPU_QUIET
+#define NR_AVE_SCALE(x)		((x) << FSHIFT)
+static inline u64 do_nr_running_integral(struct rq *rq)
 {
 	s64 nr, deltax;
-	unsigned int ave_nr_running= rq->ave_nr_running;
+	u64 nr_running_integral = rq->nr_running_integral;
 
 	deltax = rq->clock_task - rq->nr_last_stamp;
 	nr = NR_AVE_SCALE(rq->nr_running);
 
-	if (deltax > NR_AVE_PERIOD)
-		ave_nr_running = nr;
- 	else
-		ave_nr_running +=
-			NR_AVE_DIV_PERIOD(deltax * (nr - ave_nr_running));
+	nr_running_integral += nr * deltax;
 
-	return ave_nr_running;
+	return nr_running_integral;
+}
+
+static inline void add_nr_running(struct rq *rq, unsigned count)
+{
+	write_seqcount_begin(&rq->ave_seqcnt);
+	rq->nr_running_integral = do_nr_running_integral(rq);
+	rq->nr_last_stamp = rq->clock_task;
+	__add_nr_running(rq, count);
+	write_seqcount_end(&rq->ave_seqcnt);
 }
 
 static inline void sub_nr_running(struct rq *rq, unsigned count)
 {
-	rq->nr_running -= count;
+	write_seqcount_begin(&rq->ave_seqcnt);
+	rq->nr_running_integral = do_nr_running_integral(rq);
+	rq->nr_last_stamp = rq->clock_task;
+	__sub_nr_running(rq, count);
+	write_seqcount_end(&rq->ave_seqcnt);
 }
+#else
+#define add_nr_running __add_nr_running
+#define sub_nr_running __sub_nr_running
+#endif
 
 static inline void rq_last_tick_reset(struct rq *rq)
 {
